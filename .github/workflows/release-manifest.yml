@@ -1,0 +1,71 @@
+name: Generate update manifest
+
+# 约定：Release 的 tag 写成 v<版本名>-<版本码>，例如 v1.52-4006012
+# 并把对应的 APK 作为附件上传到该 Release。发布后本工作流会自动更新仓库根目录的 update.json。
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Generate update.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          NOTES: ${{ github.event.release.body }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          APK_URL=$(gh release view "$TAG" --repo "$REPO" --json assets \
+            --jq '.assets[] | select(.name | endswith(".apk")) | .url' | head -n 1)
+          if [ -z "$APK_URL" ]; then
+            echo "Release $TAG 里没有找到 .apk 附件" >&2
+            exit 1
+          fi
+          export APK_URL
+          python3 - <<'PY'
+          import json, os, re
+
+          tag = os.environ["TAG"]
+          match = re.match(r"^v?(\d+(?:\.\d+)*)-(\d+)$", tag)
+          if not match:
+              raise SystemExit(f"tag 格式应为 v1.52-4006012，收到: {tag}")
+          version_name, version_code = match.group(1), int(match.group(2))
+          notes = (os.environ.get("NOTES") or "").strip()[:500] or f"小零同学 v{version_name}"
+
+          manifest = {
+              "versionName": version_name,
+              "versionCode": version_code,
+              "notes": notes,
+              "apkUrl": os.environ["APK_URL"],
+              "pageUrl": f"https://github.com/{os.environ['REPO']}/releases/tag/{tag}",
+          }
+          with open("update.json", "w", encoding="utf-8") as f:
+              json.dump(manifest, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+          print(json.dumps(manifest, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Commit and push manifest
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add update.json
+          if git diff --cached --quiet; then
+            echo "update.json 无变化"
+          else
+            git commit -m "chore: update manifest for $TAG"
+            git push
+          fi
